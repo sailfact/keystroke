@@ -3,8 +3,6 @@
 
 use bevy::prelude::Resource;
 
-use crate::difficulty::MistakeMode;
-
 /// Gaps longer than this (in seconds) are pauses, not typing speed, so they
 /// never become per-key timing samples.
 pub const MAX_SAMPLE_GAP: f64 = 2.0;
@@ -20,18 +18,12 @@ pub enum CharState {
     Correct,
     /// Typed right after at least one miss.
     Recovered,
-    /// Typed wrong and not fixed yet. Only happens in
-    /// [`MistakeMode::FixWithBackspace`].
-    Wrong,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyResult {
     Hit,
     Miss,
-    /// Refused because the current word still has a mistake to fix. Counts
-    /// against accuracy.
-    Blocked,
     /// The lesson is already finished.
     Ignored,
 }
@@ -69,7 +61,6 @@ pub struct TypingSession {
     /// Whether each position has been missed at least once.
     missed: Vec<bool>,
     cursor: usize,
-    mode: MistakeMode,
     keystrokes: u32,
     correct_keystrokes: u32,
     started_at: Option<f64>,
@@ -77,14 +68,14 @@ pub struct TypingSession {
     /// Time of the last keystroke that moved the cursor.
     last_key_at: Option<f64>,
     /// Whether the character before the cursor was typed cleanly, with no
-    /// miss or Backspace since. Only then is the next letter's timing kept.
+    /// miss since. Only then is the next letter's timing kept.
     prev_clean: bool,
     /// Per-letter timing samples: (total ms, count).
     timing: [(f32, u32); 26],
 }
 
 impl TypingSession {
-    pub fn new(text: &str, mode: MistakeMode) -> Self {
+    pub fn new(text: &str) -> Self {
         let text: Vec<char> = text.chars().collect();
         let len = text.len();
         Self {
@@ -92,7 +83,6 @@ impl TypingSession {
             states: vec![CharState::Pending; len],
             missed: vec![false; len],
             cursor: 0,
-            mode,
             keystrokes: 0,
             correct_keystrokes: 0,
             started_at: None,
@@ -132,19 +122,6 @@ impl TypingSession {
         }
     }
 
-    /// Whether the word being typed contains a mistake that still needs
-    /// Backspace. Always false in [`MistakeMode::StopOnError`].
-    pub fn word_has_error(&self) -> bool {
-        for i in (0..self.cursor).rev() {
-            match self.states[i] {
-                CharState::Wrong => return true,
-                _ if self.text[i] == ' ' => return false,
-                _ => {}
-            }
-        }
-        false
-    }
-
     pub fn type_char(&mut self, c: char, now: f64) -> KeyResult {
         if self.is_finished() {
             return KeyResult::Ignored;
@@ -152,19 +129,15 @@ impl TypingSession {
         self.started_at.get_or_insert(now);
         self.keystrokes += 1;
 
-        // Past the end is only reachable when a mistake is left to fix.
-        let Some(&expected) = self.text.get(self.cursor) else {
-            return KeyResult::Blocked;
-        };
-        if self.mode == MistakeMode::FixWithBackspace && expected == ' ' && self.word_has_error() {
-            return KeyResult::Blocked;
-        }
-
+        let expected = self.text[self.cursor];
         if c == expected {
             self.hit(expected, now);
             KeyResult::Hit
         } else {
-            self.miss(now);
+            // The cursor waits on the character until the right key is
+            // pressed.
+            self.missed[self.cursor] = true;
+            self.prev_clean = false;
             KeyResult::Miss
         }
     }
@@ -193,33 +166,9 @@ impl TypingSession {
         self.prev_clean = clean;
         self.last_key_at = Some(now);
         self.cursor += 1;
-        if self.cursor == self.text.len() && !self.states.contains(&CharState::Wrong) {
+        if self.cursor == self.text.len() {
             self.finished_at = Some(now);
         }
-    }
-
-    fn miss(&mut self, now: f64) {
-        let i = self.cursor;
-        self.missed[i] = true;
-        self.prev_clean = false;
-        if self.mode == MistakeMode::FixWithBackspace {
-            self.states[i] = CharState::Wrong;
-            self.last_key_at = Some(now);
-            self.cursor += 1;
-        }
-    }
-
-    /// Deletes the last typed character. Returns false when Backspace does
-    /// nothing, which is always the case in [`MistakeMode::StopOnError`].
-    pub fn backspace(&mut self, now: f64) -> bool {
-        if self.mode != MistakeMode::FixWithBackspace || self.is_finished() || self.cursor == 0 {
-            return false;
-        }
-        self.cursor -= 1;
-        self.states[self.cursor] = CharState::Pending;
-        self.prev_clean = false;
-        self.last_key_at = Some(now);
-        true
     }
 
     /// Seconds from the first keystroke to `now`, or to the finish.
@@ -246,8 +195,7 @@ impl TypingSession {
         (self.correct_chars() as f64 / 5.0 / minutes) as f32
     }
 
-    /// Share of character keystrokes that were right. Backspace isn't a
-    /// character keystroke.
+    /// Share of character keystrokes that were right.
     pub fn accuracy(&self) -> f32 {
         if self.keystrokes == 0 {
             1.0
@@ -306,10 +254,8 @@ pub fn letter_slot(c: char) -> Option<usize> {
 
 /// Score for a lesson. Accuracy is squared so mistakes cost more than slow
 /// typing, and more unlocked keys make every lesson worth more.
-pub fn lesson_score(wpm: f32, accuracy: f32, keys: usize, multiplier: f32) -> u32 {
-    (wpm * accuracy * accuracy * keys as f32 * multiplier)
-        .round()
-        .max(0.0) as u32
+pub fn lesson_score(wpm: f32, accuracy: f32, keys: usize) -> u32 {
+    (wpm * accuracy * accuracy * keys as f32).round().max(0.0) as u32
 }
 
 #[cfg(test)]
@@ -317,11 +263,7 @@ mod tests {
     use super::*;
 
     fn stop(text: &str) -> TypingSession {
-        TypingSession::new(text, MistakeMode::StopOnError)
-    }
-
-    fn fix(text: &str) -> TypingSession {
-        TypingSession::new(text, MistakeMode::FixWithBackspace)
+        TypingSession::new(text)
     }
 
     #[test]
@@ -344,14 +286,6 @@ mod tests {
     }
 
     #[test]
-    fn stop_mode_ignores_backspace() {
-        let mut s = stop("ab");
-        s.type_char('a', 0.0);
-        assert!(!s.backspace(0.1));
-        assert_eq!(s.cursor(), 1);
-    }
-
-    #[test]
     fn stop_mode_finishes_on_last_char() {
         let mut s = stop("ab");
         s.type_char('a', 0.0);
@@ -359,64 +293,6 @@ mod tests {
         assert!(s.is_finished());
         assert_eq!(s.expected(), None);
         assert_eq!(s.type_char('c', 0.3), KeyResult::Ignored);
-    }
-
-    #[test]
-    fn fix_mode_miss_advances_and_marks_wrong() {
-        let mut s = fix("abc");
-        assert_eq!(s.type_char('x', 0.0), KeyResult::Miss);
-        assert_eq!(s.cursor(), 1);
-        assert_eq!(s.states()[0], CharState::Wrong);
-        assert!(s.word_has_error());
-    }
-
-    #[test]
-    fn fix_mode_backspace_then_fix_marks_recovered() {
-        let mut s = fix("ab");
-        s.type_char('x', 0.0);
-        assert!(s.backspace(0.1));
-        assert_eq!(s.cursor(), 0);
-        assert_eq!(s.states()[0], CharState::Pending);
-        assert_eq!(s.type_char('a', 0.2), KeyResult::Hit);
-        assert_eq!(s.states()[0], CharState::Recovered);
-        assert!(!s.word_has_error());
-    }
-
-    #[test]
-    fn fix_mode_blocks_space_while_word_has_error() {
-        let mut s = fix("ab cd");
-        s.type_char('a', 0.0);
-        s.type_char('x', 0.1);
-        assert_eq!(s.type_char(' ', 0.2), KeyResult::Blocked);
-        assert_eq!(s.cursor(), 2);
-        s.backspace(0.3);
-        s.type_char('b', 0.4);
-        assert_eq!(s.type_char(' ', 0.5), KeyResult::Hit);
-        assert_eq!(s.cursor(), 3);
-    }
-
-    #[test]
-    fn fix_mode_wrong_space_counts_as_word_error() {
-        let mut s = fix("ab cd");
-        s.type_char('a', 0.0);
-        s.type_char('b', 0.1);
-        s.type_char('x', 0.2);
-        assert_eq!(s.states()[2], CharState::Wrong);
-        s.type_char('c', 0.3);
-        s.type_char('d', 0.4);
-        assert!(s.word_has_error());
-    }
-
-    #[test]
-    fn fix_mode_completion_requires_no_wrong_chars() {
-        let mut s = fix("ab");
-        s.type_char('a', 0.0);
-        s.type_char('x', 0.1);
-        assert!(!s.is_finished());
-        assert_eq!(s.type_char('b', 0.2), KeyResult::Blocked);
-        s.backspace(0.3);
-        s.type_char('b', 0.4);
-        assert!(s.is_finished());
     }
 
     #[test]
@@ -476,7 +352,7 @@ mod tests {
 
     #[test]
     fn score_formula() {
-        assert_eq!(lesson_score(40.0, 0.9, 10, 2.0), 648);
-        assert_eq!(lesson_score(0.0, 1.0, 26, 3.0), 0);
+        assert_eq!(lesson_score(40.0, 0.9, 10), 324);
+        assert_eq!(lesson_score(0.0, 1.0, 26), 0);
     }
 }

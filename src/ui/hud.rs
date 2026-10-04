@@ -7,7 +7,7 @@ use super::passage::passage_bundle;
 use super::{ScreenRoot, label, theme, thousands};
 use crate::AppState;
 use crate::practice::{LastLesson, LessonCompleted, TypingSystems};
-use crate::progress::LETTER_ORDER;
+use crate::progress::{LETTER_ORDER, TARGET_WPM};
 use crate::save::SaveData;
 use crate::typing::{TypingSession, lesson_score};
 
@@ -26,7 +26,6 @@ impl Plugin for HudPlugin {
                     update_progress,
                     update_key_strip,
                     update_status,
-                    update_hint,
                     update_last_lesson,
                     show_unlock_toast,
                     fade_toasts,
@@ -55,9 +54,6 @@ struct ProgressFill;
 struct StatusLine;
 
 #[derive(Component)]
-struct HintLine;
-
-#[derive(Component)]
 struct LastLessonLine;
 
 #[derive(Component)]
@@ -71,17 +67,8 @@ struct Toast {
 #[derive(Component)]
 struct ToastBox;
 
-fn spawn_practice_screen(
-    mut commands: Commands,
-    root: Single<Entity, With<ScreenRoot>>,
-    save: Res<SaveData>,
-) {
-    let difficulty = save.selected;
-    let heading = format!(
-        "{}  |  keys unlock at {} WPM",
-        difficulty.label().to_uppercase(),
-        difficulty.rules().target_wpm
-    );
+fn spawn_practice_screen(mut commands: Commands, root: Single<Entity, With<ScreenRoot>>) {
+    let heading = format!("New keys unlock at {TARGET_WPM} WPM");
     commands.entity(*root).with_children(|screen| {
         screen
             .spawn((
@@ -199,7 +186,7 @@ fn spawn_practice_screen(
                     })
                     .with_children(|row| {
                         row.spawn((LastLessonLine, label("", 16.0, theme::TEXT_DIM)));
-                        row.spawn((HintLine, label("", 16.0, theme::TEXT_DIM)));
+                        row.spawn(label("Esc: menu", 16.0, theme::TEXT_DIM));
                     });
             });
     });
@@ -220,12 +207,7 @@ fn update_stats(
     let now = time.elapsed_secs_f64();
     let wpm = session.wpm(now);
     let accuracy = session.accuracy();
-    let score = lesson_score(
-        wpm,
-        accuracy,
-        save.current().unlocked_letters().len(),
-        save.selected.rules().score_multiplier,
-    );
+    let score = lesson_score(wpm, accuracy, save.profile.unlocked_letters().len());
     for (stat, mut text) in &mut stats {
         let value = if !session.is_started() {
             "-".to_string()
@@ -256,12 +238,11 @@ fn update_key_strip(
     mut keys: Query<(&StripKey, &mut BackgroundColor, &mut BorderColor, &Children)>,
     mut labels: Query<&mut TextColor>,
 ) {
-    let target = save.selected.rules().target_wpm;
-    let profile = save.current();
-    let focus = profile.focus_key(target);
+    let profile = &save.profile;
+    let focus = profile.focus_key();
     for (StripKey(c), mut background, mut border, children) in &mut keys {
         let (fill, text) = if profile.is_unlocked(*c) {
-            let confidence = profile.key(*c).confidence(target);
+            let confidence = profile.key(*c).confidence();
             (theme::confidence(confidence, 0.35), theme::TEXT)
         } else {
             (theme::PANEL, theme::TEXT_FAINT)
@@ -284,38 +265,23 @@ fn update_key_strip(
 }
 
 fn update_status(save: Res<SaveData>, mut line: Single<&mut Text, With<StatusLine>>) {
-    let target = save.selected.rules().target_wpm;
-    let profile = save.current();
-    let focus = match profile.focus_key(target) {
+    let profile = &save.profile;
+    let focus = match profile.focus_key() {
         Some(c) => match profile.key(c).wpm() {
-            Some(wpm) => format!("Focus: {c}  {wpm:.0} of {target:.0} WPM"),
+            Some(wpm) => format!("Focus: {c}  {wpm:.0} of {TARGET_WPM:.0} WPM"),
             None => format!("Focus: {c}  (new key)"),
         },
         None => "Every key is at target speed".to_string(),
     };
     let next = match profile.next_letter() {
         Some(c) => format!(
-            "Next key: {c}  unlocks when all {} keys reach {target:.0} WPM ({} there)",
+            "Next key: {c}  unlocks when all {} keys reach {TARGET_WPM:.0} WPM ({} there)",
             profile.unlocked_letters().len(),
-            profile.confident_keys(target),
+            profile.confident_keys(),
         ),
         None => "All keys unlocked".to_string(),
     };
     set_text(&mut line, format!("{focus}     |     {next}"));
-}
-
-fn update_hint(
-    session: Res<TypingSession>,
-    mut hint: Single<(&mut Text, &mut TextColor), With<HintLine>>,
-) {
-    let (text, color) = &mut *hint;
-    if session.word_has_error() {
-        set_text(text, "Fix the mistake with Backspace".to_string());
-        color.set_if_neq(TextColor(theme::BAD));
-    } else {
-        set_text(text, "Esc: menu".to_string());
-        color.set_if_neq(TextColor(theme::TEXT_DIM));
-    }
 }
 
 fn update_last_lesson(

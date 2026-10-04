@@ -338,7 +338,7 @@ fn flash_wrong_keys(
         *left > 0.0
     });
     for f in feedback.read() {
-        if matches!(f.kind, FeedbackKind::Miss | FeedbackKind::Blocked) {
+        if f.kind == FeedbackKind::Miss {
             flashes.0.push((f.key, FLASH_SECS));
         }
     }
@@ -353,20 +353,12 @@ fn update_keys(
     mut labels: Query<&mut TextColor, With<KeycapLabel>>,
     mut bars: Query<(&ConfidenceBar, &mut Node, &mut BackgroundColor), Without<Keycap>>,
 ) {
-    let target = save.selected.rules().target_wpm;
-    let profile = save.current();
-    let focus = profile.focus_key(target);
-    // With a mistake left to fix, Backspace is the key to press.
-    let hint = session.as_ref().and_then(|s| {
-        if s.word_has_error() {
-            Some(KeyHint {
-                key: KeyCode::Backspace,
-                shift: None,
-            })
-        } else {
-            s.expected().and_then(key_for_char)
-        }
-    });
+    let profile = &save.profile;
+    let focus = profile.focus_key();
+    let hint = session
+        .as_ref()
+        .and_then(|s| s.expected())
+        .and_then(key_for_char);
 
     for (Keycap(def), mut background, mut border, children) in &mut caps {
         let letter = def
@@ -408,7 +400,7 @@ fn update_keys(
         // No bar until the key has been timed at least once.
         let stats = profile.key(*letter);
         let (width, color) = if profile.is_unlocked(*letter) && stats.best_ms.is_some() {
-            let confidence = stats.confidence(target);
+            let confidence = stats.confidence();
             let width = confidence.clamp(0.05, 1.0) * (UNIT - 16.0);
             (width, theme::confidence(confidence, 1.0))
         } else {
@@ -424,7 +416,6 @@ fn update_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lesson::PUNCTUATION;
 
     #[test]
     fn every_row_is_fifteen_units_wide() {
@@ -436,10 +427,7 @@ mod tests {
 
     #[test]
     fn every_lesson_character_has_a_key() {
-        let lowercase = 'a'..='z';
-        let uppercase = 'A'..='Z';
-        let punctuation = PUNCTUATION.iter().map(|&(mark, _)| mark);
-        for c in lowercase.chain(uppercase).chain(punctuation).chain([' ']) {
+        for c in ('a'..='z').chain([' ']) {
             assert!(key_for_char(c).is_some(), "no key for {c:?}");
         }
     }

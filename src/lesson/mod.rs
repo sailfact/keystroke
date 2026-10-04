@@ -7,28 +7,14 @@ pub mod model;
 use bevy::prelude::Resource;
 use fastrand::Rng;
 
-use crate::difficulty::Rules;
 use model::{LetterSet, MIN_WORD_LEN, PhoneticModel};
 
-/// Letters per lesson, not counting spaces or punctuation.
+/// Letters per lesson, not counting spaces.
 pub const LESSON_LETTERS: usize = 100;
 
 /// When fewer real words than this fit the unlocked letters, invented words
 /// fill the pool.
 const MIN_POOL: usize = 15;
-
-/// Punctuation that Hard mode adds, with relative weights.
-pub const PUNCTUATION: [(char, u32); 9] = [
-    (',', 30),
-    ('.', 25),
-    ('!', 8),
-    ('?', 8),
-    ('-', 7),
-    ('\'', 6),
-    ('"', 6),
-    (';', 5),
-    (':', 5),
-];
 
 /// Common English words, written for this project. They train the phonetic
 /// model and double as the real-word dictionary.
@@ -50,13 +36,7 @@ impl Default for LessonGenerator {
 
 impl LessonGenerator {
     /// Builds a lesson from `letters`, with `focus` in every word.
-    pub fn generate(
-        &self,
-        letters: &[char],
-        focus: Option<char>,
-        rules: &Rules,
-        rng: &mut Rng,
-    ) -> String {
+    pub fn generate(&self, letters: &[char], focus: Option<char>, rng: &mut Rng) -> String {
         let pool = self.word_pool(letters, focus, rng);
         let mut words = Vec::new();
         let mut letter_count = 0;
@@ -69,9 +49,7 @@ impl LessonGenerator {
             }
             previous = Some(pick);
             letter_count += pool[pick].len();
-            let (word, extra_letters) = decorate(&pool[pick], &pool, rules, rng);
-            letter_count += extra_letters;
-            words.push(word);
+            words.push(pool[pick].as_str());
         }
         words.join(" ")
     }
@@ -107,41 +85,6 @@ impl LessonGenerator {
     }
 }
 
-/// Applies Hard mode's capitals and punctuation to a word. Returns the
-/// word and any letters it gained (a hyphen joins a second word).
-fn decorate(word: &str, pool: &[String], rules: &Rules, rng: &mut Rng) -> (String, usize) {
-    let mut word = word.to_string();
-    let mut extra_letters = 0;
-    if rules.capitals > 0.0 && rng.f32() < rules.capitals {
-        word[..1].make_ascii_uppercase();
-    }
-    if rules.punctuation > 0.0 && rng.f32() < rules.punctuation {
-        match pick_punctuation(rng) {
-            '\'' => word = format!("'{word}'"),
-            '"' => word = format!("\"{word}\""),
-            '-' => {
-                let other = &pool[rng.usize(..pool.len())];
-                extra_letters = other.len();
-                word = format!("{word}-{other}");
-            }
-            mark => word.push(mark),
-        }
-    }
-    (word, extra_letters)
-}
-
-fn pick_punctuation(rng: &mut Rng) -> char {
-    let total: u32 = PUNCTUATION.iter().map(|&(_, weight)| weight).sum();
-    let mut roll = rng.u32(..total);
-    for (mark, weight) in PUNCTUATION {
-        if roll < weight {
-            return mark;
-        }
-        roll -= weight;
-    }
-    unreachable!("roll is below the total weight")
-}
-
 /// A word of random letters, used only if the phonetic model comes up short.
 fn random_word(letters: &[char], focus: Option<char>, rng: &mut Rng) -> String {
     let len = rng.usize(MIN_WORD_LEN..=6);
@@ -160,37 +103,28 @@ mod tests {
 
     use super::model::MAX_WORD_LEN;
     use super::*;
-    use crate::difficulty::Difficulty;
     use crate::progress::{LETTER_ORDER, STARTING_KEYS};
 
     #[test]
     fn same_seed_gives_same_text() {
         let generator = LessonGenerator::default();
-        let rules = Difficulty::Hard.rules();
         let letters = &LETTER_ORDER[..10];
-        let a = generator.generate(letters, Some('a'), &rules, &mut Rng::with_seed(7));
-        let b = generator.generate(letters, Some('a'), &rules, &mut Rng::with_seed(7));
+        let a = generator.generate(letters, Some('a'), &mut Rng::with_seed(7));
+        let b = generator.generate(letters, Some('a'), &mut Rng::with_seed(7));
         assert_eq!(a, b);
     }
 
     #[test]
-    fn easy_and_medium_use_only_unlocked_letters() {
+    fn uses_only_unlocked_letters() {
         let generator = LessonGenerator::default();
         for n in [STARTING_KEYS, 10, 26] {
             let letters = &LETTER_ORDER[..n];
-            for difficulty in [Difficulty::Easy, Difficulty::Medium] {
-                for seed in 0..20 {
-                    let text = generator.generate(
-                        letters,
-                        None,
-                        &difficulty.rules(),
-                        &mut Rng::with_seed(seed),
-                    );
-                    assert!(
-                        text.chars().all(|c| c == ' ' || letters.contains(&c)),
-                        "{text}"
-                    );
-                }
+            for seed in 0..20 {
+                let text = generator.generate(letters, None, &mut Rng::with_seed(seed));
+                assert!(
+                    text.chars().all(|c| c == ' ' || letters.contains(&c)),
+                    "{text}"
+                );
             }
         }
     }
@@ -199,11 +133,9 @@ mod tests {
     fn every_word_contains_the_focus_letter() {
         let generator = LessonGenerator::default();
         let letters = &LETTER_ORDER[..STARTING_KEYS];
-        let rules = Difficulty::Medium.rules();
         for &focus in letters {
             for seed in 0..10 {
-                let text =
-                    generator.generate(letters, Some(focus), &rules, &mut Rng::with_seed(seed));
+                let text = generator.generate(letters, Some(focus), &mut Rng::with_seed(seed));
                 for word in text.split(' ') {
                     assert!(word.contains(focus), "{word:?} has no {focus:?}");
                 }
@@ -212,43 +144,14 @@ mod tests {
     }
 
     #[test]
-    fn hard_adds_only_capitals_and_known_punctuation() {
-        let generator = LessonGenerator::default();
-        let letters = &LETTER_ORDER[..12];
-        let rules = Difficulty::Hard.rules();
-        let (mut capitals, mut punctuation) = (false, false);
-        for seed in 0..20 {
-            let text = generator.generate(letters, Some('d'), &rules, &mut Rng::with_seed(seed));
-            for c in text.chars() {
-                if c.is_ascii_uppercase() {
-                    capitals = true;
-                    assert!(letters.contains(&c.to_ascii_lowercase()), "{c:?}");
-                } else if PUNCTUATION.iter().any(|&(mark, _)| mark == c) {
-                    punctuation = true;
-                } else {
-                    assert!(c == ' ' || letters.contains(&c), "{c:?} in {text}");
-                }
-            }
-        }
-        assert!(capitals && punctuation);
-    }
-
-    #[test]
     fn lessons_are_long_enough_and_cleanly_spaced() {
         let generator = LessonGenerator::default();
-        for difficulty in Difficulty::ALL {
-            for seed in 0..20 {
-                let text = generator.generate(
-                    &LETTER_ORDER,
-                    None,
-                    &difficulty.rules(),
-                    &mut Rng::with_seed(seed),
-                );
-                let letters = text.chars().filter(char::is_ascii_alphabetic).count();
-                assert!(letters >= LESSON_LETTERS, "{letters} letters: {text}");
-                assert!(!text.starts_with(' ') && !text.ends_with(' '));
-                assert!(!text.contains("  "));
-            }
+        for seed in 0..20 {
+            let text = generator.generate(&LETTER_ORDER, None, &mut Rng::with_seed(seed));
+            let letters = text.chars().filter(char::is_ascii_alphabetic).count();
+            assert!(letters >= LESSON_LETTERS, "{letters} letters: {text}");
+            assert!(!text.starts_with(' ') && !text.ends_with(' '));
+            assert!(!text.contains("  "));
         }
     }
 

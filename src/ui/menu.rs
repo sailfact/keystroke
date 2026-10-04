@@ -1,13 +1,11 @@
-//! The menu: pick a difficulty (each has its own progress), toggle sound,
-//! or reset a difficulty's progress.
+//! The menu: start practice, toggle sound, or reset progress.
 
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 
 use super::{ScreenRoot, label, theme, thousands};
 use crate::AppState;
-use crate::difficulty::Difficulty;
-use crate::progress::{LETTER_ORDER, Profile};
+use crate::progress::{LETTER_ORDER, Profile, TARGET_WPM};
 use crate::save::{self, SaveData};
 
 /// Seconds to press R a second time to confirm a reset.
@@ -29,10 +27,10 @@ impl Plugin for MenuPlugin {
 }
 
 #[derive(Component)]
-struct Card(Difficulty);
+struct Card;
 
 #[derive(Component)]
-struct CardStats(Difficulty);
+struct CardStats;
 
 #[derive(Component)]
 struct Footer;
@@ -61,39 +59,30 @@ fn spawn_menu(mut commands: Commands, root: Single<Entity, With<ScreenRoot>>) {
                     18.0,
                     theme::TEXT_DIM,
                 ));
-                menu.spawn(Node {
-                    column_gap: px(18),
-                    margin: UiRect::vertical(px(12)),
-                    ..default()
-                })
-                .with_children(|cards| {
-                    for difficulty in Difficulty::ALL {
-                        cards
-                            .spawn((
-                                Card(difficulty),
-                                Button,
-                                Node {
-                                    width: px(300),
-                                    flex_direction: FlexDirection::Column,
-                                    row_gap: px(12),
-                                    padding: px(20).all(),
-                                    border: px(2).all(),
-                                    border_radius: BorderRadius::all(px(12)),
-                                    ..default()
-                                },
-                                BackgroundColor(theme::PANEL),
-                                BorderColor::all(theme::BORDER),
-                            ))
-                            .with_children(|card| {
-                                card.spawn(label(
-                                    format!("{}  {}", difficulty.index() + 1, difficulty.label()),
-                                    28.0,
-                                    theme::TEXT,
-                                ));
-                                card.spawn(label(difficulty.blurb(), 15.0, theme::TEXT_DIM));
-                                card.spawn((CardStats(difficulty), label("", 15.0, theme::TEXT)));
-                            });
-                    }
+                menu.spawn((
+                    Card,
+                    Button,
+                    Node {
+                        width: px(360),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(12),
+                        margin: UiRect::vertical(px(12)),
+                        padding: px(20).all(),
+                        border: px(2).all(),
+                        border_radius: BorderRadius::all(px(12)),
+                        ..default()
+                    },
+                    BackgroundColor(theme::PANEL),
+                    BorderColor::all(theme::ACCENT),
+                ))
+                .with_children(|card| {
+                    card.spawn(label("Start", 28.0, theme::TEXT));
+                    card.spawn(label(
+                        format!("New keys unlock at {TARGET_WPM} WPM."),
+                        15.0,
+                        theme::TEXT_DIM,
+                    ));
+                    card.spawn((CardStats, label("", 15.0, theme::TEXT)));
                 });
                 menu.spawn((Footer, label("", 16.0, theme::TEXT_DIM)));
             });
@@ -124,24 +113,6 @@ fn menu_keys(
         if !input.state.is_pressed() || input.repeat {
             continue;
         }
-        let selected = save.selected;
-        let choice = match &input.logical_key {
-            Key::ArrowLeft => Some(selected.prev()),
-            Key::ArrowRight => Some(selected.next()),
-            Key::Character(c) => match c.as_str() {
-                "1" => Some(Difficulty::Easy),
-                "2" => Some(Difficulty::Medium),
-                "3" => Some(Difficulty::Hard),
-                _ => None,
-            },
-            _ => None,
-        };
-        if let Some(choice) = choice.filter(|&choice| choice != selected) {
-            save.selected = choice;
-            reset.0 = None;
-            continue;
-        }
-
         match &input.logical_key {
             Key::Enter | Key::Space => {
                 save::persist(&save);
@@ -154,7 +125,7 @@ fn menu_keys(
             }
             Key::Character(c) if c.eq_ignore_ascii_case("r") => {
                 if reset.0.is_some() {
-                    *save.profile_mut(selected) = Profile::default();
+                    save.profile = Profile::default();
                     save::persist(&save);
                     reset.0 = None;
                 } else {
@@ -167,68 +138,47 @@ fn menu_keys(
 }
 
 fn menu_clicks(
-    cards: Query<(&Interaction, &Card), Changed<Interaction>>,
-    mut save: ResMut<SaveData>,
+    card: Single<&Interaction, (With<Card>, Changed<Interaction>)>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
-    for (interaction, Card(difficulty)) in &cards {
-        if *interaction == Interaction::Pressed {
-            save.selected = *difficulty;
-            save::persist(&save);
-            next_state.set(AppState::Practice);
-        }
+    if **card == Interaction::Pressed {
+        next_state.set(AppState::Practice);
     }
 }
 
 fn refresh_menu(
     save: Res<SaveData>,
     reset: Res<ResetArmed>,
-    mut cards: Query<(&Card, &Interaction, &mut BackgroundColor, &mut BorderColor)>,
-    mut stats: Query<(&CardStats, &mut Text), Without<Footer>>,
+    card: Single<(&Interaction, &mut BackgroundColor), With<Card>>,
+    mut stats: Single<&mut Text, (With<CardStats>, Without<Footer>)>,
     mut footer: Single<&mut Text, With<Footer>>,
 ) {
-    for (Card(difficulty), interaction, mut background, mut border) in &mut cards {
-        let selected = *difficulty == save.selected;
-        let hovered = *interaction != Interaction::None;
-        let fill = if selected || hovered {
-            theme::PANEL_LIGHT
-        } else {
-            theme::PANEL
-        };
-        let edge = if selected {
-            theme::ACCENT
-        } else {
-            theme::BORDER
-        };
-        background.set_if_neq(BackgroundColor(fill));
-        border.set_if_neq(BorderColor::all(edge));
-    }
+    let (interaction, mut background) = card.into_inner();
+    let fill = if *interaction == Interaction::None {
+        theme::PANEL
+    } else {
+        theme::PANEL_LIGHT
+    };
+    background.set_if_neq(BackgroundColor(fill));
 
-    for (CardStats(difficulty), mut text) in &mut stats {
-        let profile = save.profile(*difficulty);
-        let value = format!(
-            "Keys: {} of {}\nLessons: {}\nBest speed: {:.0} WPM\nTotal score: {}",
-            profile.unlocked_letters().len(),
-            LETTER_ORDER.len(),
-            profile.lessons,
-            profile.best_wpm,
-            thousands(profile.total_score),
-        );
-        if text.0 != value {
-            text.0 = value;
-        }
+    let profile = &save.profile;
+    let value = format!(
+        "Keys: {} of {}\nLessons: {}\nBest speed: {:.0} WPM\nTotal score: {}",
+        profile.unlocked_letters().len(),
+        LETTER_ORDER.len(),
+        profile.lessons,
+        profile.best_wpm,
+        thousands(profile.total_score),
+    );
+    if stats.0 != value {
+        stats.0 = value;
     }
 
     let value = if reset.0.is_some() {
-        format!(
-            "Press R again to reset your {} progress",
-            save.selected.label()
-        )
+        "Press R again to reset your progress".to_string()
     } else {
         let sound = if save.sound_on { "on" } else { "off" };
-        format!(
-            "Left/Right or 1-3: choose   |   Enter: start   |   M: sound {sound}   |   R twice: reset progress"
-        )
+        format!("Enter: start   |   M: sound {sound}   |   R twice: reset progress")
     };
     if footer.0 != value {
         footer.0 = value;

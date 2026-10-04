@@ -1,5 +1,4 @@
-//! Saved progress: one profile per difficulty plus a few preferences,
-//! stored as JSON in the user's data directory.
+//! Saved progress and preferences, stored as JSON in the user's data directory.
 
 use std::fs;
 use std::io;
@@ -8,7 +7,6 @@ use std::path::PathBuf;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::difficulty::Difficulty;
 use crate::progress::Profile;
 
 const FILE_NAME: &str = "progress.json";
@@ -29,38 +27,21 @@ impl Plugin for SavePlugin {
 #[serde(default)]
 pub struct SaveData {
     pub version: u32,
-    /// The difficulty chosen last in the menu.
-    pub selected: Difficulty,
     pub sound_on: bool,
-    /// Indexed by [`Difficulty::index`].
-    pub profiles: [Profile; 3],
+    pub profile: Profile,
 }
 
 impl Default for SaveData {
     fn default() -> Self {
         Self {
-            version: 1,
-            selected: Difficulty::Easy,
+            version: 2,
             sound_on: true,
-            profiles: Default::default(),
+            profile: Profile::default(),
         }
     }
 }
 
 impl SaveData {
-    pub fn profile(&self, difficulty: Difficulty) -> &Profile {
-        &self.profiles[difficulty.index()]
-    }
-
-    pub fn profile_mut(&mut self, difficulty: Difficulty) -> &mut Profile {
-        &mut self.profiles[difficulty.index()]
-    }
-
-    /// The selected difficulty's profile.
-    pub fn current(&self) -> &Profile {
-        self.profile(self.selected)
-    }
-
     pub fn from_json(text: &str) -> serde_json::Result<Self> {
         serde_json::from_str(text)
     }
@@ -134,14 +115,12 @@ mod tests {
     #[test]
     fn round_trips_through_json() {
         let mut data = SaveData {
-            selected: Difficulty::Hard,
             sound_on: false,
             ..SaveData::default()
         };
-        let hard = data.profile_mut(Difficulty::Hard);
-        hard.unlocked = 9;
-        hard.keys[0].add_sample(250.0);
-        hard.best_wpm = 41.5;
+        data.profile.unlocked = 9;
+        data.profile.keys[0].add_sample(250.0);
+        data.profile.best_wpm = 41.5;
         assert_eq!(SaveData::from_json(&data.to_json()).unwrap(), data);
     }
 
@@ -153,8 +132,8 @@ mod tests {
     #[test]
     fn missing_fields_use_defaults() {
         assert_eq!(SaveData::from_json("{}").unwrap(), SaveData::default());
-        let data = SaveData::from_json(r#"{"profiles": [{"unlocked": 8}, {}, {}]}"#).unwrap();
-        assert_eq!(data.profile(Difficulty::Easy).unlocked, 8);
-        assert_eq!(data.profile(Difficulty::Medium), &Profile::default());
+        let data = SaveData::from_json(r#"{"profile": {"unlocked": 8}}"#).unwrap();
+        assert_eq!(data.profile.unlocked, 8);
+        assert_eq!(data.profile.keys, Profile::default().keys);
     }
 }

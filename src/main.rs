@@ -3,7 +3,6 @@
 //! faster.
 
 mod audio;
-mod difficulty;
 mod lesson;
 mod practice;
 mod progress;

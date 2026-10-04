@@ -86,7 +86,7 @@ fn flash_on_mistake(
     flash.0 = (flash.0 - time.delta_secs()).max(0.0);
     let mistakes = feedback
         .read()
-        .filter(|f| matches!(f.kind, FeedbackKind::Miss | FeedbackKind::Blocked))
+        .filter(|f| f.kind == FeedbackKind::Miss)
         .count();
     if mistakes > 0 {
         flash.0 = FLASH_SECS;
@@ -113,7 +113,6 @@ fn color_passage(
             CharState::Pending => (theme::TEXT_FAINT, Color::NONE, Color::NONE),
             CharState::Correct => (theme::TEXT, Color::NONE, Color::NONE),
             CharState::Recovered => (theme::WARN, Color::NONE, Color::NONE),
-            CharState::Wrong => (theme::BAD, theme::BAD_BACKGROUND, Color::NONE),
         };
         if cursor == Some(*i) {
             fg = theme::TEXT;

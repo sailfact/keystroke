@@ -6,7 +6,6 @@ use std::f32::consts::TAU;
 
 use bevy::audio::Volume;
 use bevy::prelude::*;
-use fastrand::Rng;
 
 use crate::practice::{FeedbackKind, KeyFeedback, LessonCompleted, TypingSystems};
 use crate::save::SaveData;
@@ -24,9 +23,7 @@ impl Plugin for SfxPlugin {
 
 #[derive(Resource)]
 struct Sfx {
-    key: Handle<AudioSource>,
     miss: Handle<AudioSource>,
-    backspace: Handle<AudioSource>,
     lesson: Handle<AudioSource>,
     unlock: Handle<AudioSource>,
 }
@@ -38,9 +35,7 @@ fn load_sounds(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>)
         })
     };
     commands.insert_resource(Sfx {
-        key: add(key_click()),
         miss: add(error_buzz()),
-        backspace: add(backspace_tick()),
         lesson: add(lesson_chime()),
         unlock: add(unlock_fanfare()),
     });
@@ -52,7 +47,6 @@ fn play_sounds(
     save: Res<SaveData>,
     mut feedback: MessageReader<KeyFeedback>,
     mut completed: MessageReader<LessonCompleted>,
-    mut rng: Local<Rng>,
 ) {
     if !save.sound_on {
         feedback.clear();
@@ -60,13 +54,9 @@ fn play_sounds(
         return;
     }
     for event in feedback.read() {
-        let (sound, volume, speed) = match event.kind {
-            // A little pitch variation keeps fast typing from sounding robotic.
-            FeedbackKind::Hit => (&sfx.key, 0.5, 0.95 + rng.f32() * 0.1),
-            FeedbackKind::Miss | FeedbackKind::Blocked => (&sfx.miss, 0.45, 1.0),
-            FeedbackKind::Backspace => (&sfx.backspace, 0.4, 1.0),
-        };
-        play(&mut commands, sound, volume, speed);
+        if event.kind == FeedbackKind::Miss {
+            play(&mut commands, &sfx.miss, 0.45);
+        }
     }
     for event in completed.read() {
         let sound = if event.summary.unlocked.is_some() {
@@ -74,31 +64,18 @@ fn play_sounds(
         } else {
             &sfx.lesson
         };
-        play(&mut commands, sound, 0.6, 1.0);
+        play(&mut commands, sound, 0.6);
     }
 }
 
-fn play(commands: &mut Commands, sound: &Handle<AudioSource>, volume: f32, speed: f32) {
+fn play(commands: &mut Commands, sound: &Handle<AudioSource>, volume: f32) {
     commands.spawn((
         AudioPlayer::new(sound.clone()),
         PlaybackSettings {
             volume: Volume::Linear(volume),
-            speed,
             ..PlaybackSettings::DESPAWN
         },
     ));
-}
-
-/// A soft mechanical key: a low thock, a burst of noise and a faint tick.
-pub fn key_click() -> Vec<f32> {
-    let mut noise = Rng::with_seed(1);
-    let samples = render(0.06, |t| {
-        let thock = (TAU * 160.0 * t).sin() * (-t * 70.0).exp();
-        let click = (noise.f32() * 2.0 - 1.0) * (-t * 450.0).exp();
-        let tick = (TAU * 2600.0 * t).sin() * (-t * 350.0).exp();
-        0.6 * thock + 0.3 * click + 0.15 * tick
-    });
-    normalize(samples, 0.8)
 }
 
 /// A low, slightly detuned buzz for a wrong key.
@@ -109,12 +86,6 @@ pub fn error_buzz() -> Vec<f32> {
         (tone * 2.0).tanh() * envelope
     });
     normalize(samples, 0.8)
-}
-
-/// A short, quiet tick for Backspace.
-pub fn backspace_tick() -> Vec<f32> {
-    let samples = render(0.03, |t| (TAU * 900.0 * t).sin() * (-t * 160.0).exp());
-    normalize(samples, 0.6)
 }
 
 /// Two rising notes when a lesson ends.
@@ -220,9 +191,7 @@ mod tests {
     #[test]
     fn sounds_are_audible_and_in_range() {
         let sounds = [
-            ("key", key_click()),
             ("miss", error_buzz()),
-            ("backspace", backspace_tick()),
             ("lesson", lesson_chime()),
             ("unlock", unlock_fanfare()),
         ];

@@ -41,8 +41,6 @@ pub struct TypingSystems;
 pub enum FeedbackKind {
     Hit,
     Miss,
-    Blocked,
-    Backspace,
 }
 
 /// Sent for each keystroke the lesson reacted to.
@@ -79,18 +77,11 @@ pub struct LastLesson(pub Option<LessonSummary>);
 #[derive(Resource)]
 struct LessonRng(Rng);
 
-/// A new lesson for the selected difficulty.
 fn next_session(save: &SaveData, generator: &LessonGenerator, rng: &mut Rng) -> TypingSession {
-    let rules = save.selected.rules();
-    let profile = save.current();
-    let text = generator.generate(
-        profile.unlocked_letters(),
-        profile.focus_key(rules.target_wpm),
-        &rules,
-        rng,
-    );
+    let profile = &save.profile;
+    let text = generator.generate(profile.unlocked_letters(), profile.focus_key(), rng);
     debug!("New lesson: {text}");
-    TypingSession::new(&text, rules.mistakes)
+    TypingSession::new(&text)
 }
 
 fn start_practice(
@@ -136,32 +127,21 @@ fn handle_typing(
         if !input.state.is_pressed() {
             continue;
         }
-        let kind = match &input.logical_key {
-            Key::Escape => {
-                next_state.set(AppState::Menu);
-                return;
-            }
-            Key::Backspace => {
-                if !session.backspace(now) {
-                    continue;
-                }
-                FeedbackKind::Backspace
-            }
-            key => {
-                // Holding a key down shouldn't type it again and again.
-                if input.repeat || shortcut_held {
-                    continue;
-                }
-                let Some(c) = typed_char(key) else {
-                    continue;
-                };
-                match session.type_char(c, now) {
-                    KeyResult::Hit => FeedbackKind::Hit,
-                    KeyResult::Miss => FeedbackKind::Miss,
-                    KeyResult::Blocked => FeedbackKind::Blocked,
-                    KeyResult::Ignored => continue,
-                }
-            }
+        if input.logical_key == Key::Escape {
+            next_state.set(AppState::Menu);
+            return;
+        }
+        // Holding a key down shouldn't type it again and again.
+        if input.repeat || shortcut_held {
+            continue;
+        }
+        let Some(c) = typed_char(&input.logical_key) else {
+            continue;
+        };
+        let kind = match session.type_char(c, now) {
+            KeyResult::Hit => FeedbackKind::Hit,
+            KeyResult::Miss => FeedbackKind::Miss,
+            KeyResult::Ignored => continue,
         };
         feedback.write(KeyFeedback {
             kind,
@@ -195,12 +175,8 @@ fn finish_lesson(
     if !session.is_finished() {
         return;
     }
-    let difficulty = save.selected;
-    let rules = difficulty.rules();
     let stats = session.stats(time.elapsed_secs_f64());
-    let outcome = save
-        .profile_mut(difficulty)
-        .apply_lesson(&stats, &session.tally(), &rules);
+    let outcome = save.profile.apply_lesson(&stats, &session.tally());
     save::persist(&save);
 
     let summary = LessonSummary {
@@ -224,7 +200,6 @@ mod tests {
     use bevy::state::app::StatesPlugin;
 
     use super::*;
-    use crate::difficulty::MistakeMode;
 
     /// Feedback sent since the test last looked.
     #[derive(Resource, Default)]
@@ -236,19 +211,19 @@ mod tests {
 
     /// A headless app running only the input system on a fixed lesson,
     /// before its first update.
-    fn headless(text: &str, mode: MistakeMode) -> App {
+    fn headless(text: &str) -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, StatesPlugin, InputPlugin))
             .init_state::<AppState>()
             .add_message::<KeyFeedback>()
             .init_resource::<Received>()
-            .insert_resource(TypingSession::new(text, mode))
+            .insert_resource(TypingSession::new(text))
             .add_systems(Update, (handle_typing, record).chain());
         app
     }
 
-    fn app(text: &str, mode: MistakeMode) -> App {
-        let mut app = headless(text, mode);
+    fn app(text: &str) -> App {
+        let mut app = headless(text);
         app.update();
         app
     }
@@ -275,7 +250,7 @@ mod tests {
 
     #[test]
     fn keys_drive_the_session() {
-        let mut app = app("ab", MistakeMode::StopOnError);
+        let mut app = app("ab");
         press(&mut app, Key::Character("a".into()), KeyCode::KeyA);
         assert_eq!(cursor(&app), 1);
         assert_eq!(feedback(&mut app), [FeedbackKind::Hit]);
@@ -286,20 +261,17 @@ mod tests {
     }
 
     #[test]
-    fn space_and_backspace_keys() {
-        let mut app = app("a b", MistakeMode::FixWithBackspace);
+    fn space_key_types_a_space() {
+        let mut app = app("a b");
         press(&mut app, Key::Character("a".into()), KeyCode::KeyA);
         press(&mut app, Key::Space, KeyCode::Space);
         assert_eq!(cursor(&app), 2);
         assert_eq!(feedback(&mut app), [FeedbackKind::Hit, FeedbackKind::Hit]);
-        press(&mut app, Key::Backspace, KeyCode::Backspace);
-        assert_eq!(cursor(&app), 1);
-        assert_eq!(feedback(&mut app), [FeedbackKind::Backspace]);
     }
 
     #[test]
     fn keys_queued_before_the_lesson_are_dropped() {
-        let mut app = headless("ab", MistakeMode::StopOnError);
+        let mut app = headless("ab");
         press(&mut app, Key::Character("a".into()), KeyCode::KeyA);
         assert_eq!(cursor(&app), 0);
         assert!(feedback(&mut app).is_empty());
@@ -307,7 +279,7 @@ mod tests {
 
     #[test]
     fn key_repeats_are_ignored() {
-        let mut app = app("aa", MistakeMode::StopOnError);
+        let mut app = app("aa");
         app.world_mut().write_message(KeyboardInput {
             key_code: KeyCode::KeyA,
             logical_key: Key::Character("a".into()),
@@ -322,7 +294,7 @@ mod tests {
 
     #[test]
     fn escape_returns_to_the_menu() {
-        let mut app = app("ab", MistakeMode::StopOnError);
+        let mut app = app("ab");
         app.world_mut()
             .resource_mut::<NextState<AppState>>()
             .set(AppState::Practice);
